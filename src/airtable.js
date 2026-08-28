@@ -34,3 +34,6 @@ export const update = (table, id, fields) =>
   });
 
 export const get = (table, id) => req(`${encodeURIComponent(table)}/${id}`);
+
+export const remove = (table, id) =>
+  req(`${encodeURIComponent(table)}/${id}`, { method: "DELETE" });

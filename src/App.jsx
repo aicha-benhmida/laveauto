@@ -18,8 +18,279 @@ const friendlyError = (raw) => {
 
 export default function App() {
   const [authed, setAuthed] = useState(sessionStorage.getItem("laveauto_auth") === "1");
+  const [tab, setTab] = useState("qr");
   if (!authed) return <Login onLogin={() => setAuthed(true)} />;
-  return <QRSearchApp />;
+  return (
+    <div style={{ minHeight: "100vh", background: "#f9fafb" }}>
+      <div style={{ maxWidth: 600, margin: "0 auto", padding: "24px 16px 0" }}>
+        <div style={{ display: "flex", gap: 4, marginBottom: 16, background: "#e5e7eb", padding: 4, borderRadius: 10 }}>
+          <TabButton active={tab === "qr"} onClick={() => setTab("qr")}>QR Code</TabButton>
+          <TabButton active={tab === "client"} onClick={() => setTab("client")}>Client</TabButton>
+          <TabButton active={tab === "dashboard"} onClick={() => setTab("dashboard")}>Tableau de bord</TabButton>
+        </div>
+      </div>
+      {tab === "qr" ? <QRSearchApp /> : tab === "client" ? <ClientHistory /> : <Dashboard />}
+    </div>
+  );
+}
+
+const TabButton = ({ active, onClick, children }) => (
+  <button onClick={onClick} style={{
+    flex: 1, padding: "8px 12px", borderRadius: 7, border: "none", cursor: "pointer",
+    background: active ? "white" : "transparent", color: active ? "#111827" : "#6b7280",
+    fontWeight: active ? 600 : 500, fontSize: 14, boxShadow: active ? "0 1px 2px rgba(0,0,0,0.08)" : "none",
+  }}>
+    {children}
+  </button>
+);
+
+function Dashboard() {
+  const [abonnements, setAbonnements] = useState([]);
+  const [lavages, setLavages] = useState([]);
+  const [qrCodes, setQrCodes] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [threshold, setThreshold] = useState(() => {
+    const saved = localStorage.getItem("laveauto_threshold");
+    return saved ? Number(saved) : 10;
+  });
+  const [prices, setPrices] = useState(() => {
+    try {
+      const saved = localStorage.getItem("laveauto_prices");
+      return saved ? JSON.parse(saved) : { "5 Lavages": 30, "10 Lavages": 55, "20 Lavages": 100 };
+    } catch {
+      return { "5 Lavages": 30, "10 Lavages": 55, "20 Lavages": 100 };
+    }
+  });
+
+  useEffect(() => {
+    (async () => {
+      const [ab, la, qr] = await Promise.all([at.list("Abonnements"), at.list("Lavages"), at.list("QR Codes")]);
+      setAbonnements(ab); setLavages(la); setQrCodes(qr);
+      setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("laveauto_prices", JSON.stringify(prices));
+  }, [prices]);
+
+  useEffect(() => {
+    localStorage.setItem("laveauto_threshold", String(threshold));
+  }, [threshold]);
+
+  if (loading) return <div style={{ maxWidth: 600, margin: "0 auto", padding: "0 16px 24px", color: "#6b7280" }}>Chargement...</div>;
+
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfWeek = new Date(startOfToday); startOfWeek.setDate(startOfWeek.getDate() - 6);
+
+  const washDate = (l) => (l.fields["Date/heure"] ? new Date(l.fields["Date/heure"]) : null);
+  const todayCount = lavages.filter((l) => { const d = washDate(l); return d && d >= startOfToday; }).length;
+  const weekCount = lavages.filter((l) => { const d = washDate(l); return d && d >= startOfWeek; }).length;
+
+  const validCount = abonnements.filter((a) => a.fields["Statut"] === "VALIDE").length;
+  const expiredCount = abonnements.filter((a) => a.fields["Statut"] === "EXPIRÉ" || a.fields["Statut"] === "TERMINÉ").length;
+
+  const abonnementsThisWeek = abonnements.filter((a) => {
+    const d = a.fields["Date début"] ? new Date(a.fields["Date début"]) : null;
+    return d && d >= startOfWeek;
+  });
+  const revenueEstimate = abonnementsThisWeek.reduce((sum, a) => sum + (prices[a.fields["Forfait"]] || 0), 0);
+
+  const statusText = (val) => {
+    const raw = val && typeof val === "object" ? val.name || "" : val || "";
+    return raw.trim().toUpperCase();
+  };
+  const byStatusLabel = qrCodes.filter((q) => statusText(q.fields["Status"]) === "DISPONIBLE").length;
+  const byNoLink = qrCodes.filter((q) => !q.fields["Abonnement"] || q.fields["Abonnement"].length === 0).length;
+  // Trust the Status label when it actually has DISPONIBLE codes; otherwise
+  // fall back to "no linked abonnement" so a mismatched select option name
+  // doesn't silently show 0.
+  const availableQR = byStatusLabel > 0 ? byStatusLabel : byNoLink;
+  const lowStock = availableQR < threshold;
+
+  return (
+    <div style={{ maxWidth: 600, margin: "0 auto", padding: "0 16px 24px" }}>
+      {lowStock && (
+        <div style={{ background: "#fffbeb", border: "1px solid #fde68a", color: "#92400e", padding: "12px 16px", borderRadius: 10, marginBottom: 16, display: "flex", alignItems: "center", gap: 8, fontSize: 14 }}>
+          <span>⚠️</span>
+          <span>Il ne reste que <strong>{availableQR}</strong> QR codes disponibles (seuil: {threshold}). Pensez à en réimprimer.</span>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+        <StatCard label="Lavages aujourd'hui" value={todayCount} color="#111827" />
+        <StatCard label="Lavages (7 jours)" value={weekCount} color="#111827" />
+        <StatCard label="Abonnements actifs" value={validCount} color="#16a34a" />
+        <StatCard label="Abonnements expirés" value={expiredCount} color="#dc2626" />
+        <StatCard label="QR codes disponibles" value={availableQR} color={lowStock ? "#dc2626" : "#111827"} />
+        <StatCard label="QR codes total" value={qrCodes.length} color="#111827" />
+      </div>
+
+      <div style={{ background: "white", borderRadius: 12, padding: 20, border: "1px solid #e5e7eb", boxShadow: "0 1px 2px rgba(0,0,0,0.05)", marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+          <span style={{ fontSize: 14, color: "#6b7280" }}>Revenu estimé (7 derniers jours)</span>
+          <span style={{ fontSize: 22, fontWeight: 700, color: "#111827" }}>{revenueEstimate} TND</span>
+        </div>
+        <div style={{ fontSize: 12, color: "#9ca3af" }}>Basé sur {abonnementsThisWeek.length} nouveaux abonnements et les prix ci-dessous</div>
+      </div>
+
+      <div style={{ background: "white", borderRadius: 12, padding: 20, border: "1px solid #e5e7eb", boxShadow: "0 1px 2px rgba(0,0,0,0.05)", marginBottom: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: "#111827", marginBottom: 10 }}>Seuil d'alerte QR codes</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 14, color: "#374151" }}>Alerter en dessous de</span>
+          <input
+            type="number"
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value))}
+            style={{ width: 70, padding: 6, border: "1px solid #ddd", borderRadius: 6, textAlign: "right", color: "#111827" }}
+          />
+          <span style={{ fontSize: 14, color: "#374151" }}>codes restants</span>
+        </div>
+      </div>
+
+      <div style={{ background: "white", borderRadius: 12, padding: 20, border: "1px solid #e5e7eb", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: "#111827", marginBottom: 10 }}>Prix par forfait (pour l'estimation)</div>
+        {Object.keys(FORFAITS).map((f) => (
+          <div key={f} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 14, color: "#374151" }}>{f}</span>
+            <input
+              type="number"
+              value={prices[f]}
+              onChange={(e) => setPrices({ ...prices, [f]: Number(e.target.value) })}
+              style={{ width: 90, padding: 6, border: "1px solid #ddd", borderRadius: 6, textAlign: "right", color: "#111827" }}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const StatCard = ({ label, value, color }) => (
+  <div style={{ background: "white", borderRadius: 12, padding: 16, border: "1px solid #e5e7eb", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}>
+    <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 4 }}>{label}</div>
+    <div style={{ fontSize: 26, fontWeight: 700, color }}>{value}</div>
+  </div>
+);
+
+function ClientHistory() {
+  const [query, setQuery] = useState("");
+  const [clients, setClients] = useState([]);
+  const [vehicules, setVehicules] = useState([]);
+  const [abonnements, setAbonnements] = useState([]);
+  const [lavages, setLavages] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const [cl, ve, ab, la] = await Promise.all([
+        at.list("Clients"), at.list("Véhicules"), at.list("Abonnements"), at.list("Lavages"),
+      ]);
+      setClients(cl); setVehicules(ve); setAbonnements(ab); setLavages(la);
+      setLoading(false);
+    })();
+  }, []);
+
+  const matches = query.length >= 2
+    ? clients.filter((c) =>
+        (c.fields["Nom"] || "").toLowerCase().includes(query.toLowerCase()) ||
+        (c.fields["Téléphone"] || "").toLowerCase().includes(query.toLowerCase())
+      )
+    : [];
+
+  const clientVehicules = selected ? vehicules.filter((v) => v.fields["Client"]?.includes(selected.id)) : [];
+  const clientAbonnements = selected ? abonnements.filter((a) => a.fields["Client"]?.includes(selected.id)) : [];
+  const clientAbonnementIds = clientAbonnements.map((a) => a.id);
+  const clientLavages = selected
+    ? lavages
+        .filter((l) => l.fields["Client"]?.includes(selected.id) || l.fields["Abonnement"]?.some((id) => clientAbonnementIds.includes(id)))
+        .sort((a, b) => new Date(b.fields["Date/heure"] || 0) - new Date(a.fields["Date/heure"] || 0))
+    : [];
+
+  return (
+    <div style={{ maxWidth: 600, margin: "0 auto", padding: "0 16px 24px" }}>
+      <div style={{ background: "white", borderRadius: 12, padding: 20, marginBottom: 16, border: "1px solid #e5e7eb", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}>
+        <input
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); setSelected(null); }}
+          placeholder="Rechercher par nom ou téléphone..."
+          style={{ width: "100%", padding: 11, border: "1px solid #d1d5db", borderRadius: 8, fontSize: 15, color: "#111827", outline: "none" }}
+        />
+      </div>
+
+      {loading && <p style={{ color: "#6b7280" }}>Chargement...</p>}
+
+      {!selected && matches.length > 0 && (
+        <div style={{ background: "white", borderRadius: 12, border: "1px solid #e5e7eb", overflow: "hidden" }}>
+          {matches.map((c) => (
+            <button key={c.id} onClick={() => setSelected(c)}
+              style={{ display: "block", width: "100%", textAlign: "left", padding: 14, background: "white", border: "none", borderBottom: "1px solid #f3f4f6", cursor: "pointer" }}>
+              <div style={{ fontWeight: 600, color: "#111827" }}>{c.fields["Nom"]}</div>
+              <div style={{ fontSize: 13, color: "#6b7280" }}>{c.fields["Téléphone"] || "-"}</div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!selected && query.length >= 2 && matches.length === 0 && !loading && (
+        <div style={{ background: "white", borderRadius: 12, padding: 24, textAlign: "center", color: "#6b7280" }}>
+          Aucun client trouvé pour "{query}"
+        </div>
+      )}
+
+      {selected && (
+        <div>
+          <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", marginBottom: 12, fontSize: 14, padding: 0 }}>
+            ← Retour aux résultats
+          </button>
+
+          <div style={{ background: "white", borderRadius: 12, padding: 20, marginBottom: 16, border: "1px solid #e5e7eb", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}>
+            <h2 style={{ fontSize: 18, fontWeight: 700, color: "#111827", marginBottom: 4 }}>{selected.fields["Nom"]}</h2>
+            <div style={{ color: "#6b7280", fontSize: 14 }}>{selected.fields["Téléphone"] || "-"}</div>
+            {selected.fields["Email"] && <div style={{ color: "#6b7280", fontSize: 14 }}>{selected.fields["Email"]}</div>}
+
+            {clientVehicules.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>Véhicule(s)</div>
+                {clientVehicules.map((v) => (
+                  <div key={v.id} style={{ fontSize: 14, color: "#111827" }}>
+                    {v.fields["Matriculation"]} {v.fields["Marque"] ? `· ${v.fields["Marque"]} ${v.fields["Modèle"] || ""}` : ""}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <h3 style={{ fontSize: 15, fontWeight: 600, color: "#111827", marginBottom: 8 }}>Abonnements ({clientAbonnements.length})</h3>
+          {clientAbonnements.length === 0 && <p style={{ color: "#6b7280", fontSize: 14, marginBottom: 16 }}>Aucun abonnement.</p>}
+          {clientAbonnements.map((a) => {
+            const s = a.fields["Statut"];
+            return (
+              <div key={a.id} style={{ background: "white", borderRadius: 10, padding: 14, marginBottom: 8, border: "1px solid #e5e7eb" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600, color: "#111827" }}>{a.fields["Forfait"]}</span>
+                  <span style={{ fontWeight: 600, fontSize: 13, color: s === "VALIDE" ? "#16a34a" : "#dc2626" }}>{s}</span>
+                </div>
+                <div style={{ fontSize: 13, color: "#6b7280" }}>
+                  {a.fields["Date début"]} → {a.fields["Date fin"]} · {a.fields["Lavages restants"]} lavages restants
+                </div>
+              </div>
+            );
+          })}
+
+          <h3 style={{ fontSize: 15, fontWeight: 600, color: "#111827", margin: "16px 0 8px" }}>Historique des lavages ({clientLavages.length})</h3>
+          {clientLavages.length === 0 && <p style={{ color: "#6b7280", fontSize: 14 }}>Aucun lavage enregistré.</p>}
+          {clientLavages.map((l) => (
+            <div key={l.id} style={{ background: "white", borderRadius: 10, padding: "10px 14px", marginBottom: 6, border: "1px solid #e5e7eb", fontSize: 14, color: "#111827" }}>
+              {l.fields["Date/heure"] ? new Date(l.fields["Date/heure"]).toLocaleString("fr-FR") : "-"}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function QRSearchApp() {
@@ -35,6 +306,7 @@ function QRSearchApp() {
   const [err, setErr] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
+  const [lastLavage, setLastLavage] = useState(null); // { id, abonnementId }
   const scannerRef = useRef(null);
 
   const [newA, setNewA] = useState({
@@ -66,6 +338,7 @@ function QRSearchApp() {
 
   useEffect(() => {
     const loadAbonnement = async () => {
+      setLastLavage(null);
       if (!matchedQR?.fields["Abonnement"]?.length) { setAbonnement(null); return; }
       const recs = await at.list("Abonnements");
       const found = recs.find((r) => r.id === matchedQR.fields["Abonnement"][0]);
@@ -114,7 +387,7 @@ function QRSearchApp() {
     try {
       const client = abonnement.fields["Client"]?.[0];
       const veh = abonnement.fields["Véhicule"]?.[0];
-      await at.create("Lavages", {
+      const lavage = await at.create("Lavages", {
         Abonnement: [abonnement.id],
         "Date/heure": new Date().toISOString(),
         ...(client ? { Client: [client] } : {}),
@@ -122,7 +395,22 @@ function QRSearchApp() {
       });
       const used = (abonnement.fields["Lavages utilisés"] || 0) + 1;
       await at.update("Abonnements", abonnement.id, { "Lavages utilisés": used });
+      setLastLavage({ id: lavage.id, abonnementId: abonnement.id });
       showMsg("Lavage créé!");
+      await refreshAbonnement();
+    } catch (e) { setErr(friendlyError(e.message)); }
+    setLoading(false);
+  };
+
+  const undoLastLavage = async () => {
+    if (!lastLavage) return;
+    setErr(""); setLoading(true);
+    try {
+      await at.remove("Lavages", lastLavage.id);
+      const used = Math.max((abonnement.fields["Lavages utilisés"] || 0) - 1, 0);
+      await at.update("Abonnements", lastLavage.abonnementId, { "Lavages utilisés": used });
+      setLastLavage(null);
+      showMsg("Dernier lavage annulé.");
       await refreshAbonnement();
     } catch (e) { setErr(friendlyError(e.message)); }
     setLoading(false);
@@ -223,10 +511,7 @@ function QRSearchApp() {
   const vehInfo = abonnement && vehicules.find((v) => v.id === abonnement.fields["Véhicule"]?.[0]);
 
   return (
-    <div style={{ minHeight: "100vh", background: "#f9fafb", padding: "24px 16px" }}>
-      <div style={{ maxWidth: 600, margin: "0 auto" }}>
-        <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 20, color: "#111827" }}>Recherche QR Code</h1>
-
+    <div style={{ maxWidth: 600, margin: "0 auto", padding: "0 16px 24px" }}>
         {msg && <div style={{ background: "#dcfce7", color: "#166534", padding: 10, borderRadius: 6, marginBottom: 12 }}>{msg}</div>}
         {err && (
           <div style={{ background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", padding: "10px 14px", borderRadius: 8, marginBottom: 12, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
@@ -267,6 +552,13 @@ function QRSearchApp() {
                 {statut === "VALIDE" && (
                   <button onClick={createLavage} disabled={loading}
                     style={btnStyle("#16a34a")}>{loading ? "..." : "Créer un lavage"}</button>
+                )}
+
+                {lastLavage && lastLavage.abonnementId === abonnement.id && (
+                  <button onClick={undoLastLavage} disabled={loading}
+                    style={{ ...btnStyle("white"), color: "#dc2626", border: "1px solid #fecaca" }}>
+                    {loading ? "..." : "↩ Annuler le dernier lavage"}
+                  </button>
                 )}
 
                 {(statut === "EXPIRÉ" || statut === "TERMINÉ") && (
@@ -364,7 +656,6 @@ function QRSearchApp() {
             Aucun QR code trouvé pour "{query}"
           </div>
         )}
-      </div>
     </div>
   );
 }
