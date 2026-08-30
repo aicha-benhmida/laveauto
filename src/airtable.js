@@ -1,39 +1,69 @@
-const BASE_ID = import.meta.env.VITE_AIRTABLE_BASE_ID;
-const TOKEN = import.meta.env.VITE_AIRTABLE_TOKEN;
-const API = `https://api.airtable.com/v0/${BASE_ID}`;
+const FUNCTION_URL = "/.netlify/functions/airtable";
+const TOKEN_KEY = "laveauto_token";
 
-async function req(path, options = {}) {
-  const res = await fetch(`${API}/${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Airtable ${res.status}: ${err}`);
-  }
-  return res.json();
+export function getToken() {
+  return sessionStorage.getItem(TOKEN_KEY) || "";
 }
 
-export const list = (table, params = "") =>
-  req(`${encodeURIComponent(table)}?${params}`).then((d) => d.records);
+export function setToken(token) {
+  sessionStorage.setItem(TOKEN_KEY, token);
+}
 
-export const create = (table, fields) =>
-  req(`${encodeURIComponent(table)}`, {
-    method: "POST",
-    body: JSON.stringify({ fields }),
-  });
+export function clearToken() {
+  sessionStorage.removeItem(TOKEN_KEY);
+}
 
-export const update = (table, id, fields) =>
-  req(`${encodeURIComponent(table)}/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify({ fields }),
-  });
+async function req(body, retries = 3) {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    const res = await fetch(FUNCTION_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${getToken()}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 429 && attempt < retries - 1) {
+      const delay = Math.pow(2, attempt) * 1000; 
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
 
-export const get = (table, id) => req(`${encodeURIComponent(table)}/${id}`);
+    if (res.status === 401) {
+      clearToken();
+      window.location.reload();
+      throw new Error("Session expirée. Merci de vous reconnecter.");
+    }
 
-export const remove = (table, id) =>
-  req(`${encodeURIComponent(table)}/${id}`, { method: "DELETE" });
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+    if (!res.ok) {
+      throw new Error(`Airtable ${res.status}: ${data ? JSON.stringify(data) : "request failed"}`);
+    }
+    return data;
+  }
+}
+
+export async function list(table, extraParams = "") {
+  let all = [];
+  let offset;
+  do {
+    const parts = [];
+    if (extraParams) parts.push(extraParams);
+    parts.push("pageSize=100");
+    if (offset) parts.push(`offset=${encodeURIComponent(offset)}`);
+    const data = await req({ table, method: "GET", params: parts.join("&") });
+    all = all.concat(data.records || []);
+    offset = data.offset;
+  } while (offset);
+  return all;
+}
+
+export const create = (table, fields) => req({ table, method: "POST", fields });
+export const update = (table, id, fields) => req({ table, id, method: "PATCH", fields });
+export const get = (table, id) => req({ table, id, method: "GET" });
+export const remove = (table, id) => req({ table, id, method: "DELETE" });
